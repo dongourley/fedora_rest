@@ -1,0 +1,983 @@
+<?php
+// $Id$
+
+// load the Fedora REST API class
+require_once('FedoraClient.class');
+
+/**
+ * define constants used by this module
+ */
+// Default node type for Fedora object nodes
+define('FEDORA_REST_NODE', 'fedora_object');
+
+// Fedora object node permissions
+define('FEDORA_REST_CREATE', 'create Fedora Object node');
+define('FEDORA_REST_UPDATE_OWN', 'update own Fedora Object node');
+define('FEDORA_REST_UPDATE_ANY', 'update any Fedora Object node');
+define('FEDORA_REST_DELETE_OWN', 'delete own Fedora Object node');
+define('FEDORA_REST_DELETE_ANY', 'delete any Fedora Object node');
+
+
+/********************************
+ * Node hook implementations    *
+ *******************************/
+
+/**
+ * Implements hook_node_info().
+ */
+function fedora_rest_node_info() {
+    fedora_rest_trace("fedora_rest_node_info()");
+
+    return array(
+        FEDORA_REST_NODE => array(
+            'name' => t('Fedora Object'),
+            'module' => 'fedora_rest',
+            'description' => t('A <em>Fedora object</em> links to an object in a Fedora repository.'),
+            'has_title' => TRUE,
+            'title_label' => t('Resource Title'),
+            'has_body' => TRUE,
+            'body_label' => t('Resource Body'),
+        )
+    );
+}
+
+/**
+ * Implements hook_menu().
+ */
+function fedora_rest_menu() {
+    fedora_rest_trace("fedora_rest_menu()");
+
+    $items['admin/settings/fedora_rest'] = array(
+        'title' => 'Fedora API settings',
+        'description' => 'Configure Fedora repository and content',
+        'page callback' => 'drupal_get_form',
+        'page arguments' => array('fedora_rest_admin_settings'),
+        'access arguments' => array('administer site configuration'),
+        'type' => MENU_NORMAL_ITEM,
+        'file' => 'fedora_rest_admin.inc',
+    );
+
+    return $items;
+}
+
+/**
+ * Implements hook_form()
+ *
+ */
+function fedora_rest_form($node) {
+    fedora_rest_trace("fedora_rest_form($node->nid)");
+
+    // get metadata for the project node type defined in _node_info
+    $type = node_get_types('type', $node);
+
+    if (isset($node->persistent_id)) {
+        // this is an existing fedora_object node
+        $form['show_pid'] = array(
+            '#value' => t('<strong>Identifier:</strong> ')
+                        . "<pre>$node->persistent_id</pre>\n",
+            '#weight'=> -20
+        );
+
+        // make the body read-only
+        $form['body'] = array(
+            '#value' => isset($node->body) ? "<strong>Body:</strong><pre>$node->body</pre>" : '',
+            '#weight' => -19,
+        );
+        $form['persistent_id'] = array(
+            '#type' => 'value',
+            '#default_value' => $node->persistent_id,
+        );
+        $form['import_model'] = array(
+            '#type' => 'value',
+            '#default_value' => $node->import_model,
+        );
+        $form['collection_id'] = array(
+            '#type' => 'value',
+            '#default_value' => $node->collection_id,
+        );
+        $form['form_op'] = array(
+            '#type' => 'value',
+            '#title' => '',
+            '#value' => 'update',
+        );
+
+    } else {
+        // new node being created, get pid and collection
+        $form['persistent_id'] = array(
+            '#type' => 'textfield',
+            '#title' => 'Persistent identifier',
+            '#required' => TRUE,
+            '#default_value' => '',
+            '#weight' => -10,
+            '#maxlength' => 255,
+        );
+        $collections = array ();
+        $result = db_query("SELECT * FROM {fedora_rest_collection}");
+        while ($c = db_fetch_object($result)) {
+            $collections[$c->id] = $c->uri.'@'.$c->server.'('.$c->version.')';
+        }
+        $form['collection_id'] = array(
+            '#type' => 'select',
+            '#title' => t('Repository collection'),
+            '#options' => $collections,
+            '#required' => TRUE,
+            '#weight' => -9,
+        );
+        $form['form_op'] = array(
+            '#type' => 'value',
+            '#title' => '',
+            '#value' => 'create',
+        );
+    }
+
+    // add node settings to form
+    $vocabs = array ();
+    if (module_exists('taxonomy')) {
+        foreach(taxonomy_get_vocabularies( ) as $v) {
+            $vocabs[$v->name] = $v->name;
+        }
+    }
+    $form['fedora_rest_node'] = fedora_rest_node_fields($vocabs);
+
+    // add support for input filters:
+    if (isset($node->format)) {
+        $format = $node->format;
+    } else {
+        $format = variable_get('fedora_rest_format', 0);
+    }
+    $form['body_filter']['filter'] = filter_form($format);
+    $form['body_filter']['body'] = array(
+        '#type' => 'hidden',
+        '#title' => '',
+        '#required' => FALSE,
+        '#default_value' => '',
+        '#weight' => 10,
+    );
+
+    return $form;
+}
+
+
+/**
+ * Implements hook_form_alter()
+ *
+ */
+function fedora_rest_form_alter(&$form, $form_state, $form_id,
+                                $my_form='fedora_object_node_form')
+{
+    fedora_rest_trace("fedora_rest_form_alter($form_id)");
+
+    if ($form_id == $my_form) {
+        unset($form['buttons']['preview']);
+        if ($form['form_op']['#value'] == 'create') {
+            $form['buttons']['submit']['#value'] = t('Create from Repository');
+            unset($form['taxonomy']);
+            unset($form['attachments']);
+        }
+        if ($form['form_op']['#value'] == 'update') {
+            $form['buttons']['submit']['#value'] = t('Update from Repository');
+            if (isset($form['taxonomy'])) {
+                $form['taxonomy']['#description'] = t('All term XPath expressions must be cleared from the Node/object settings if you want to use these Vocabularies settings to tag the node. If any XPath expressions are used then tagging from repository data will replace all these tags.');
+            }
+        }
+    }
+}
+
+/**
+ * Implements hook_validate()
+ *
+ */
+function fedora_rest_validate($node) {
+    fedora_rest_trace("fedora_rest_validate($node->nid)");
+
+    $pid = $node->persistent_id;
+    $cid = $node->collection_id;
+
+    if (! (isset($pid) && $pid != '') ) {
+        form_set_error('persistent_id', "PID field is required");
+        return;
+    }
+    if (! (isset($cid) && $cid != 0) ) {
+        form_set_error('collection_id', "Collection field is required");
+        return;
+    }
+
+    // verify that such an object exists in the collection
+    $coll = db_fetch_object(db_query("SELECT * FROM {fedora_rest_collection} WHERE id=%d",$cid));
+    if (is_object($coll)) {
+        $client = new FedoraClient( $coll->server, NULL, NULL, $coll->version );
+        $q = "pid=$pid";
+        $request = array( query => $q );
+        try{
+            $response = $client->findObjects( $request );
+        } catch (Exception $e) {
+            form_set_error('collection_id', $e->getMessage());
+            return;
+        }
+        $rcount = count($response);
+        if ($rcount != 1) {
+            form_set_error('persistent_id',
+                "There are $rcount objects in the repository with pid='$pid'");
+            return;
+        }
+    } else {
+        form_set_error('collection_id', "Collection identifier $cid is not valid");
+        return;
+    }
+}
+
+/**
+ * Implements hook_load()
+ *
+ */
+function fedora_rest_load($node) {
+    fedora_rest_trace("fedora_rest_load($node->nid)");
+
+    $nid = $node->nid;
+
+    $fedora_object = db_fetch_object(db_query("SELECT * FROM {fedora_rest_node} WHERE nid=%d", $nid));
+
+    // get parts and add to the fedora object
+    $phash = array();
+    $parts = db_query("SELECT * FROM {fedora_rest_part} WHERE nid=%d", $nid);
+    while ($part_object = db_fetch_object($parts)) {
+        $dhash = array();
+        $datastreams = db_query("SELECT * FROM {fedora_rest_datastream} WHERE nid=%d AND part_id='%s'", $nid, $part_object->part_id);
+        while ($ds = db_fetch_object($datastreams)) {
+            $dhash[$ds->ds_id] = $ds;
+        }
+        $part_object->datastreams = $dhash;
+        $phash[$part_object->part_id] = $part_object;
+    }
+    $fedora_object->fedora_rest_parts = $phash;
+
+    return $fedora_object;
+}
+
+/**
+ * Implements hook_view()
+ *
+ */
+function fedora_rest_view($node, $teaser = FALSE, $page = FALSE) {
+    fedora_rest_trace("fedora_rest_view($node->nid,$teaser,$page)");
+
+    $pid = $node->persistent_id? $node->persistent_id : 'default:notIdentified';
+
+    if ($node->body == '') {
+        /**
+         * Build generic body with object identifiers and links to datastreams.
+         * Note: You can't build a body like this when you create your node,
+         *       because fedora_rest_parts[] is not built until hook_load()
+         */
+        // get parts and list
+        if (is_array($node->fedora_rest_parts)) {
+            $body = fedora_rest_make_body($node->fedora_rest_parts, $pid);
+        } else {
+            $body = "<b>$pid:</b> (<em>no parts</em>)\n";
+        }
+
+        list($teas, $rest) = split("\n", $body, 2);
+
+        $node->body = $body;
+        $node->teaser = $teas;
+    }
+
+    // Apply filters and build the node's standard elements.
+    $node = node_prepare($node, $teaser);
+
+    return $node;
+}
+
+
+/**
+ * Implements hook_insert()
+ */
+function fedora_rest_insert($node) {
+    fedora_rest_trace("fedora_rest_insert($node->nid)");
+
+    // Insert the node-specific data in the fedora_rest_node table
+    db_query("INSERT INTO {fedora_rest_node} (nid,persistent_id,import_model,collection_id) VALUES (%d,'%s','%s',%d)",
+            $node->nid, $node->persistent_id, $node->import_model, $node->collection_id
+    );
+
+    // Get the datastreams for this object & children and store in database
+    if ( ! fedora_rest_make_parts($node, $node->persistent_id) ) {
+        node_delete($node->nid);
+        drupal_set_message( $node->type.' node '.$node->nid.' has been deleted',
+                            'error' );
+    }
+}
+
+/**
+ * Implements hook_update()
+ *
+ */
+function fedora_rest_update($node) {
+    fedora_rest_trace("fedora_rest_update($node->nid)");
+
+    // recreate the node by syncing with repository
+
+    $nid = $node->nid;
+
+    // Check whether the Fedora object is created
+    $fedora_object = db_fetch_object(db_query("SELECT * FROM {fedora_rest_node} WHERE nid=%d", $nid));
+    if ($fedora_object === FALSE) {
+        return fedora_rest_insert($node);
+    } else {
+        // Update the node-specific data in the fedora_rest_node table
+        if ($node->collection_id != $fedora_object->collection_id) {
+            db_query("UPDATE {fedora_rest_node} SET collection_id=%d WHERE nid=%d", $node->collection_id, $nid);
+        }
+        // re-do all the datastream and child project parts
+        if ( ! fedora_rest_make_parts($node, $node->persistent_id) ) {
+            drupal_set_message( $node->type.
+                                " node $nid sync with repository failed",
+                                'error' );
+        }
+    }
+    //drupal_set_message( print_r($node,TRUE), 'debug' );
+}
+
+/**
+ * Implements hook_delete()
+ *
+ */
+function fedora_rest_delete($node) {
+    fedora_rest_trace("fedora_rest_delete($node->nid)");
+
+    $nid = $node->nid;
+
+    $fedora_object = db_fetch_object(db_query("SELECT * FROM {fedora_rest_node} WHERE nid=%d", $nid));
+
+    if (isset($fedora_object)) {
+        // delete the fedora object table row
+        db_query("DELETE FROM {fedora_rest_node} WHERE nid = %d", $nid);
+        // delete the object part table rows
+        db_query("DELETE FROM {fedora_rest_part} WHERE nid = %d", $nid);
+        // delete the part datastream table rows
+        db_query("DELETE FROM {fedora_rest_datastream} WHERE nid = %d", $nid);
+    }
+
+    if (module_exists('path')) {
+        $path = "node/$row->nid";
+        db_query("DELETE FROM {url_alias} WHERE src = '%s'", $path);
+    }
+}
+
+
+/**
+ * Implements hook_perm()
+ *
+ */
+function fedora_rest_perm( ) {
+    fedora_rest_trace("fedora_rest_perm()");
+
+    return array(
+        FEDORA_REST_CREATE,
+        FEDORA_REST_UPDATE_OWN,
+        FEDORA_REST_UPDATE_ANY,
+        FEDORA_REST_DELETE_OWN,
+        FEDORA_REST_DELETE_ANY,
+    );
+}
+
+/**
+ * Implements hook_access()
+ *
+ */
+function fedora_rest_access($op, $node, $account) {
+    fedora_rest_trace("fedora_rest_access($op,$node->nid,$account->uid)");
+
+    $is_owner = ($node->uid == $account->uid);
+
+    switch ($op) {
+
+    case 'view':
+        return TRUE;
+
+    case 'create':
+        return user_access(FEDORA_REST_CREATE);
+
+    case 'delete':
+        return ( user_access(FEDORA_REST_DELETE_ANY) ||
+                ($is_owner && user_access(FEDORA_REST_DELETE_OWN)) );
+
+    case 'update':
+        return ( user_access(FEDORA_REST_UPDATE_ANY) ||
+                ($is_owner && user_access(FEDORA_REST_UPDATE_OWN)) );
+
+    default:
+        return NULL;
+    }
+}
+
+
+/**
+ * Implements hook_nodeapi()
+ *
+ * Used for presave operation, in order to retrieve structural and
+ * (optionally) descriptive metadata from the repository. If $arg3
+ * is set to this module's content-type when called from another
+ * module, then this hook will operate on that module's content-type.
+ */
+function fedora_rest_nodeapi(&$node, $op, $parent_type=NULL, $arg4=NULL) {
+    fedora_rest_trace("fedora_rest_nodeapi($node->nid,$op,$parent_type)");
+
+    if (($node->type==FEDORA_REST_NODE || $parent_type==FEDORA_REST_NODE) &&
+        $op == 'presave')
+    {
+        $pid = $node->persistent_id;
+        $cid = $node->collection_id;
+
+        if (! isset($pid)) {
+            drupal_set_message( 'PID is not set in node '.$node->nid, 'error' );
+            $pid = 'default:notIdentified';
+        }
+
+        if (isset($cid)) {
+            // get the server URL for this collection
+            $coll = db_fetch_object(db_query("SELECT * FROM {fedora_rest_collection} WHERE id=%d",$cid));
+            if (is_object($coll)) {
+                $client = new FedoraClient( $coll->server, NULL, NULL,
+                                            $coll->version );
+                $q = "pid=$pid";
+                $request = array( title => 'true',
+                                description => 'true',
+                                query => $q );
+                try{
+                    $response = $client->findObjects( $request );
+                } catch (Exception $e) {
+                    $exception = '<pre>'.print_r($e, true).'</pre>';
+                    drupal_set_message('presave:'.$exception,'error');
+                    return FALSE;
+                }
+                $rcount = count($response);
+                if ($rcount != 1) {
+                    drupal_set_message("There are $rcount objects in the repository with pid='$pid'", 'error');
+                    return FALSE;
+                } else {
+                    if (isset($response[$pid]->title)) {
+                        $node->title = (string) $response[$pid]->title;
+                    } else {
+                        $node->title = t('Untitled FedoraCommons Object');
+                    }
+                    if (isset($response[$pid]->description)) {
+                        $node->teaser = (string) $response[$pid]->description;
+                    } else {
+                        $node->teaser = $pid;
+                    }
+                }
+
+                // if an XML datastream was specified, then put it in the body
+                $xmlds = isset( $node->fedora_rest_xmlds_arg ) ?
+                                $node->fedora_rest_xmlds_arg : '';
+                if ($xmlds) {
+                    try {
+                        $xml = $client->getXMLDissemination($pid,$xmlds);
+                    } catch (Exception $e) {
+                        drupal_set_message( '$xmlds not parsed: '
+                                            . $e->getMessage(), 'error' );
+                        return FALSE;
+                    }
+                    $node->body = $xml->asXML( );
+                } else {
+                    // body must be generated in hook_view()
+                    $node->body = '';
+                }
+
+                if (module_exists('taxonomy')) {
+                    // check for metadata to extract
+                    $tags = array(); $datastreams = array();
+                    foreach(taxonomy_get_vocabularies($node->type) as $v) {
+                        $varg = 'fedora_rest_'
+                                . str_replace(' ','_',$v->name) . '_arg';
+                        $xpath = isset($node->{$varg}) ? $node->{$varg} : '';
+                        if ($xpath) {
+                            $s = preg_split('/[\s]+/', $xpath, 2);
+                            if ($s[1]) {
+                                // variable holds both dsID and xpath expr
+                                // so get datastream for this metadata el
+                                $xpath = $s[1];
+                                $xdsid = $s[0];
+                                if (isset($datastreams[$xdsid])) {
+                                    $ds = $datastreams[$xdsid];
+                                } else {
+                                    try {
+                                        $ds = $client->getDatastreamDissemination($pid, $xdsid);
+                                        $datastreams[$xdsid] = $ds;
+                                    } catch (Exception $e) {
+                                        drupal_set_message("$xdsid not parsed: " . $e->getMessage(),'warning');
+                                        continue;
+                                    }
+                                }
+                            } else {
+                                // variable just has xpath expression
+                                // so use XML dissemination retrieved 4 body
+                                $ds = $xml;
+                            }
+                            if ($metadata = $ds->xpath($xpath)) {
+                                foreach ($metadata as $md) {
+                                    $tags[fedora_rest_xml2plain($md->asXML())] = $v->vid;
+                                }
+                            }
+                            fedora_rest_trace("$varg:$xpath:$metadata[0]");
+                        }
+                    }
+                    if (! empty($tags)) {
+                        $node->taxonomy = fedora_rest_make_taxonomy($tags);
+                    }
+                }
+
+                if (module_exists('path')) {
+                    $node->path = $pid;
+                }
+            } else {
+                drupal_set_message("Missing collection record $cid\n", 'error');
+            }
+        } else {
+            drupal_set_message( 'Collection not set in node '.$node->nid,
+                                'error' );
+        }
+    }
+}
+
+
+/**
+ * Implements hook_filter()
+ *
+ */
+function fedora_rest_filter($op, $delta = 0, $format = -1, $text = '') {
+  switch ($op) {
+    case 'list':
+      return array (
+      0 => t('XSLT filter')
+     );
+     
+    case 'description':
+      return t('Apply XSL transformation at view time using a supplied XSL file.');
+    
+    case 'settings':
+      return fedora_rest_filter_settings($format);
+    
+    case 'no cache':
+      // we allow caching
+      return false;
+      
+    case 'prepare': 
+      // no need
+      return $text;
+    
+    case 'process':
+      $text = fedora_rest_transform( $text, $format );
+      if ($text === FALSE) {
+        drupal_set_message("XSL Transformation failed.",'warning');
+        $text = "<p>Error creating body: XSL Transformation failed.</p>\n";
+      }
+      return $text;
+    
+    case 'default':
+      return $text;
+  }
+}
+
+function fedora_rest_transform($xml_text, $format) {
+
+    $lines = explode(PHP_EOL, trim($xml_text));
+    fedora_rest_trace("fedora_rest_transform('$lines[0]',$format)");
+
+    if (strpos($lines[0], '<') === FALSE) {
+        // text is not XML, probably a teaser not to be transformed
+        return $xml_text;
+    }
+
+    // create a DOM document and load the XSL stylesheet
+    $xsl = new DomDocument;
+    $xsl_path =variable_get('fedora_rest_XSLPATH_'. $format, '');
+    if (! $xsl->load($xsl_path)) {
+        drupal_set_message("Couldn't load $xsl_path", 'error');
+        return FALSE;
+    }
+
+    // create a DOM document and load the XML data
+    $xml_doc = new domDocument;
+    $xml_doc->loadXML($xml_text, LIBXML_DTDLOAD);
+
+    // import the XSL stylesheet into the XSLT process
+    $xp = new XsltProcessor();
+    $xp->importStylesheet($xsl);
+
+    // transform the XML into HTML using the XSL file
+    if ($html = $xp->transformToXML($xml_doc)) {
+        return $html;
+    } else {
+        return FALSE;
+    }
+}
+
+
+/**
+ * Settings for XSLT filter.
+ */
+function fedora_rest_filter_settings($format) {
+  $form['fedora_rest_xslt_filter'] = array(
+    '#type' => 'fieldset',
+    '#title' => t('XSLT filter'),
+    '#collapsible' => TRUE,
+  );
+  $form['fedora_rest_xslt_filter']['fedora_rest_XSLPATH_'. $format] = array(
+    '#type' => 'textfield',
+    '#title' => t('Path to XSL template'),
+    '#default_value' => variable_get('fedora_rest_XSLPATH_'. $format, ''),
+    '#maxlength' => 255,
+    '#description' => t('Please make sure this file exists, is readable and is a valid XSL file. Can be full path or relative to the Drupal directory.'),
+  );
+  return $form;
+}
+
+/**
+ * Implements hook_filter_tips()
+ *
+ */
+function fedora_rest_filter_tips($delta, $format, $long = FALSE) {
+  if ($long) {
+    return t('Apply XSL transformation at view time using a supplied XSL file.');   
+  } else {
+    return t('Apply XSL transformation at view time using a supplied XSL file.');
+  }
+}
+
+/**
+* Implements hook_help().
+*/
+function fedora_rest_help($section) {
+  switch ($section) {
+    case 'admin/help#fedora_rest':
+      // Return a line-break version of the module README
+      $readme = dirname(__FILE__)."/README.txt";
+      return filter_filter('process', 1, NULL, file_get_contents( $readme ));
+  }
+}
+
+
+/********************************
+ * Manage Fedora Object parts   *
+ *******************************/
+
+/**
+ * Create a node body from fedora object hasPart hierarchy (recursive)
+ */
+function fedora_rest_make_body($parts, $pid, $depth = 0) {
+    fedora_rest_trace("fedora_rest_make_body($pid,$depth)");
+
+    // indent children to indicate hierarchy
+    $indent = '&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;';
+
+    $i = 0;
+    while ($i < $depth) {
+        $body .= $indent; $i++;
+    }
+
+    // list this part's ID, description and datastreams
+    $body .= "<b>$pid:</b> ";
+    if (is_object($parts[$pid])) {
+        $body .= $parts[$pid]->description . ' =>';
+        foreach ($parts[$pid]->datastreams as $ds) {
+            $body .= ' <a href="'.$ds->rest_url.'">'.$ds->ds_id.'</a>';
+        }
+    }
+    $body .= "<br />\n";
+
+    // list this part's parts
+    foreach ($parts as $part_id => $subpart) {
+        // $parts is flat, so need to select this pid's children from list
+        if ($pid == $subpart->parent_id && $pid != $part_id) {
+            $body .= fedora_rest_make_body($parts, $part_id, $depth+1);
+        }
+    }
+    return $body;
+}
+
+/**
+ * Reset all the datastream links for this node
+ * 
+ * recursive function, need to tell it when to stop in case our
+ * RELS-EXT graph is cyclic
+ */
+function fedora_rest_make_parts($node, $part_id, $parent_id=NULL,
+                                $depth=0, $max=NULL, $client=NULL)
+{
+    fedora_rest_trace("fedora_rest_make_parts($node->nid,$part_id,$parent_id,$depth)");
+
+    $nid = $node->nid;
+
+    if (is_null($max)) {
+        $max = isset( $node->fedora_rest_depth ) ?
+                      $node->fedora_rest_depth : 0;
+    }
+
+    // delete all existing part records
+    if ($depth === 0) {
+        db_query("DELETE FROM {fedora_rest_part} WHERE nid = %d", $nid);
+        db_query("DELETE FROM {fedora_rest_datastream} WHERE nid = %d", $nid);
+    }
+
+    // get the server URL for this collection
+    $coll = db_fetch_object(
+            db_query("SELECT * FROM {fedora_rest_collection} WHERE id=%d",
+                    $node->collection_id) );
+    if (is_object($coll)) {
+        $server = $coll->server;
+        $version = $coll->version;
+    } else {
+        drupal_set_message('Bad collection id '.$node->collection_id .
+                " in fedora_rest_make_parts( $nid,$part_id,$depth,$max).",
+                'error');
+        return FALSE;
+    }
+
+    // create a client object if needed
+    if (is_null($client)) {
+        $client = new FedoraClient( $server, NULL, NULL, $version );
+    }
+
+    // get description
+    $description = '';
+    try {
+        $dublinCore = $client->getDatastreamDissemination($part_id, 'DC');
+        foreach($dublinCore->xpath('dc:description') as $el) {
+            if ($description) $description .= '. ';
+            $description .= (string)$el;
+        }
+    } catch (Exception $e) {
+        $exception = '<pre>'.print_r($e, true).'</pre>';
+        drupal_set_message('make_parts_1:'.$exception,'error');
+        return FALSE;
+    }
+
+    // create part record
+    db_query("INSERT INTO {fedora_rest_part} (nid,part_id,parent_id,description) VALUES (%d,'%s','%s','%s')",
+            $nid,
+            $part_id,
+            $parent_id? $parent_id : $part_id,
+            $description
+        );
+
+    // get object's datastreams
+    try {
+        $dslist = $client->listDatastreams($part_id);
+        foreach($dslist as $dsid => $sxe) {
+            // create datastream record
+            $url = $server."/objects/$part_id/datastreams/$dsid";
+            if (! isset($client->API_EXPERIMENTAL[$version]) ) {
+                $url .= '/content';
+            }
+            db_query("INSERT INTO {fedora_rest_datastream} (nid,part_id,ds_id,rest_url) VALUES (%d,'%s','%s','%s')",
+                    $nid,
+                    $part_id,
+                    $dsid,
+                    $url
+            );
+        }
+    } catch (Exception $e) {
+        $exception = '<pre>'.print_r($e, true).'</pre>';
+        drupal_set_message('make_parts_2:'.$exception,'error');
+        return FALSE;
+    }
+
+    // recurse for each part
+    if ($depth < $max) {
+        try {
+            $rdf = $client->getDatastreamDissemination($part_id, 'RELS-EXT');
+            $rel = isset( $node->fedora_rest_has_part_arg ) ?
+                          $node->fedora_rest_has_part_arg : 'rel:hasPart';
+            $relparts = explode(':', $rel);
+            $ns = $rdf->getNamespaces(false);
+            if (! isset($ns[$relparts[0]])) {
+                $rdf->registerXPathNamespace($relparts[0],
+                        'info:fedora/fedora-system:def/relations-external#');
+            }
+            foreach($rdf->xpath("/rdf:RDF/rdf:Description/$rel") as $res)
+            {
+                $attrs = $res->attributes($ns['rdf']);
+                $uri_pid = (string)$attrs->resource;
+                list($uri,$pid) = split('/', $uri_pid, 2);
+                fedora_rest_make_parts($node,$pid,$part_id,$depth+1,$max,$client);
+            }
+        } catch (Exception $e) {
+            $exception = '<pre>'.print_r($e, true).'</pre>';
+            drupal_set_message('make_parts_3:'.$exception,'error');
+            return FALSE;
+        }
+    }
+
+    return TRUE;
+
+}
+
+
+/********************************
+ * Manage metadata vocabularies *
+ *******************************/
+
+/**
+ * re-initialize a vocabulary in preparation for re-importing metadata tags
+ */
+function fedora_rest_delete_terms($vid) {
+    fedora_rest_trace("fedora_rest_delete_terms($vid)");
+
+    $result = db_query('SELECT tid FROM {term_data} WHERE vid = %d', $vid);
+    while ($term = db_fetch_object($result)) {
+        taxonomy_del_term($term->tid);
+    }
+}
+
+/**
+ * Clear all the tags associated with a node
+ */
+function fedora_rest_clear_terms($nid) {
+    fedora_rest_trace("fedora_rest_clear_terms($nid)");
+
+    db_query("DELETE FROM {term_node} WHERE nid = %d", $nid);
+
+}
+
+/**
+ * add a term to a vocabulary (if it isn't already there) and return term ID
+ */
+function fedora_rest_make_term($term_name, $vid) {
+    fedora_rest_trace("fedora_rest_make_term($term_name,$vid)");
+
+    $tid = 0;
+    $tlist = taxonomy_get_term_by_name($term_name);
+    foreach ($tlist as $t) {
+        if ($t->vid == $vid) {
+            $tid = $t->tid;
+        }
+    }
+    if (! $tid) {
+        $term = array();
+        $term['vid'] = $vid;
+        $term['name'] = $term_name;
+        $rtn = taxonomy_save_term( $term );
+        if (! $rtn) {
+            drupal_set_message("Term creation for '$term_name' ($vid) returned '$rtn'",'error');
+        }
+        $tid = $term['tid'];
+    }
+    return $tid;
+}
+
+/**
+ * Create the taxonomy array for tagging a node with specified terms
+ */
+function fedora_rest_make_taxonomy($terms = array()) {
+    fedora_rest_trace("fedora_rest_make_taxonomy()");
+
+    $nodetax = array ();
+
+    foreach ($terms as $term_name => $vid) {
+        $tid = fedora_rest_make_term($term_name, $vid);
+        if (! is_array($nodetax[$vid])) {
+            $nodetax[$vid] = array();
+        }
+        $nodetax[$vid][$tid] = $tid;
+
+        if (isset( $node->fedora_rest_tag_parents_flag ) ?
+                   $node->fedora_rest_tag_parents_flag : FALSE)
+        {
+            $parents = taxonomy_get_parents($tid);
+            foreach ($parents as $pid => $pterm) {
+                $nodetax[$vid][$pid] = $pid;
+            }
+        }
+    }
+
+    return $nodetax;
+}
+
+/********************************/
+
+
+/**
+ * Create form fields for importing a digital object used by admin & edit forms
+ */
+function fedora_rest_node_fields( $vocabs=array() ) {
+
+    $fields = array(
+        '#type' => 'fieldset',
+        '#title' => t('Node/object settings'),
+        '#collapsible' => TRUE,
+        '#description' => t('These parameters specify how the structure and description of a Fedora object is mapped to a Drupal node. Hierarchical aggregation objects can be collapsed into one node. XML metadata can be imported into node bodies and taxonomy terms for indexing, tagging and viewing.'),
+        '#weight' => 0,
+    );
+    $fields['fedora_rest_depth'] = array(
+        '#type' => 'select',
+        '#title' => 'Hierarchy depth',
+        '#options' => drupal_map_assoc(array(0,1,2,3,4,5,6,7,8,9,10)),
+        '#multiple' => FALSE,
+        '#default_value' => variable_get('fedora_rest_depth', 0),
+        '#description' => t('Specify how far in a hierarchy the module should traverse to find a complex object\'s parts and datastreams. Use "0" if you are not importing complex objects made up of a hierarchy of constituent objects.'),
+        '#weight' => 0,
+    );
+    $fields['fedora_rest_has_part_arg'] = array(
+        '#type' => 'textfield',
+        '#title' => t('Hierarchy relationship'),
+        '#required' => FALSE,
+        '#default_value' => variable_get('fedora_rest_has_part_arg',
+                                        FEDORA_REST_DEFAULT_PREDICATE),
+        '#maxlength' => 255,
+        '#description' => t('Enter the predicate used in a complex object\'s RELS-EXT datastream to relate it to its constituent parts.'),
+        '#weight' => 1,
+    );
+    $fields['fedora_rest_xmlds_arg'] = array(
+        '#type' => 'textfield',
+        '#title' => t('XML dissemination'),
+        '#required' => FALSE,
+        '#default_value' => variable_get( 'fedora_rest_xmlds_arg', '' ),
+        '#maxlength' => 255,
+        '#description' => t('Enter the path to XML content if you want it saved in a Drupal node body. For example, the Dublin Core datastream would be specified as "datastreams/DC/content"; disseminators are specified as "methods/{sdefPid}/{method}[?method&parms]". The dissemination retrieved must be a valid XML datastream.'),
+        '#weight' => 2,
+    );
+    if (! empty($vocabs)) {
+        foreach($vocabs as $v) {
+            $varg = 'fedora_rest_' . str_replace(' ','_',$v) . '_arg';
+            $fields[$varg] = array(
+                '#type' => 'textfield',
+                '#title' => "$v XPath",
+                '#required' => FALSE,
+                '#default_value' => variable_get($varg, ''),
+                '#maxlength' => 255,
+                '#description' => t('Specify an XPath expression to select a term from the XML Dissemination with which to tag imported nodes. You can also specify any XML datastream to select from by entering the datastream ID in front of the XPath expression (separated by a space).'),
+                '#weight' => 3,
+            );
+        }
+        $fields['fedora_rest_tag_parents_flag'] = array(
+            '#type' => 'checkbox',
+            '#title' => t('Tag nodes with parent terms.'),
+            '#default_value' => variable_get('fedora_rest_tag_parents', FALSE),
+            '#description' => t('Enable this option if you use hierarchical vocabularies and want a node tagged with the parent term if it was tagged with a child term. (NB: incompatible with vocabulary_index counts.)'),
+                '#weight' => 4,
+        );
+    }
+    return $fields;
+}
+
+
+/**
+ * Utility function to convert (and normalise) an XML string to plain text
+ */
+function fedora_rest_xml2plain($string) {
+
+    return trim(strip_tags(preg_replace('/\s+/', ' ', $string)));
+}
+
+
+/**
+ * Debugging trace method
+ */
+function fedora_rest_trace($msg) {
+
+    if (variable_get('fedora_rest_trace_flag', FALSE)) {
+        drupal_set_message("TRACE: $msg",'debug');
+    }
+}

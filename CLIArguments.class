@@ -1,0 +1,164 @@
+<?php
+// $Id$
+
+/**
+ * @file
+ *
+ * PHP methods for parsing command line interface argument vector
+ */
+
+class CLIArguments {
+
+	protected $args;
+	protected $opts;
+
+	// Known options definition:
+	// (where each "=" at the end denotes a following argument)
+	// $known_opts = array('a', 'b', 'c=');
+	// $known_longopts = array('aaa', 'bbb', 'ccc=');
+
+	public function __construct($known_opts=array(), $known_longopts=array())
+	{
+		global $argc, $argv;
+
+		$this->args = array();
+		$this->opts = array();
+		$process = true;
+
+		for ($i = 0; $i < $argc; $i++) {
+			$arg = $argv[$i];
+			// This signals the end of any parameters
+			if ($arg == '--') {
+				$process = false;
+			}
+			// Check long options
+			elseif ($process && substr($arg, 0, 2) == '--') {
+				$ok = false;
+				foreach ($known_longopts as $opt) {
+					$add_args = 0;
+					while (substr($opt, -1) == '=') {
+						$add_args++;
+						$opt = substr($opt, 0, -1);
+					}
+					if ($arg == '--' . $opt) {
+						$this_opt = array($opt);
+						while ($add_args--) {
+							$i++;
+							if (!isset($argv[$i]))
+								die("Too few parameters for long option '$arg'\n");
+							$this_opt[] = $argv[$i];
+						}
+						$this->opts[] = $this_opt;
+						$ok = true;
+						break;
+					}
+				}
+				if (!$ok) die("Unrecognised long option '$arg'\n");
+
+			}
+
+			// Check short options
+			// Don't touch a '-' on its own, leave it as normal parameter
+			elseif ($process && strlen($arg) > 1 && substr($arg, 0, 1) == '-') {
+				// For each character
+				for ($c = 1; $c < strlen($arg); $c++) {
+					$ch = $arg{$c};
+					$ok = false;
+					foreach ($known_opts as $opt) {
+						$add_args = 0;
+						while (substr($opt, -1) == '=') {
+							$add_args++;
+							$opt = substr($opt, 0, -1);
+						}
+						if ($ch == $opt) {
+							$this_opt = array($opt);
+							while ($add_args--) {
+								$i++;
+								if (!isset($argv[$i]))
+									die("Too few parameters for option '-$ch'\n");
+								$this_opt[] = $argv[$i];
+							}
+							$this->opts[] = $this_opt;
+							$ok = true;
+							break;
+						}
+					}
+					if (!$ok) die("Unrecognised option '-$ch'\n");
+				}
+			} else {
+				// Non-options
+				$this->args[] = $arg;
+			}
+		}
+	}
+
+	// Find if an option is set
+	// Optionally checks a second name and combines with OR
+	//
+	public function isOptionSet($name, $name2 = null) {
+		foreach ($this->opts as $opt) {
+			if ($opt[0] == $name) {
+				return true;
+			}
+			if ($name2 && $opt[0] == $name2) {
+				return true;
+			}
+		}
+		return false;
+	}
+
+	// Get the first option parameter for a given option name
+	// Only finds the first occurance of an option
+	// Optionally checks a second name
+	//
+	public function getOptionValue($name, $name2 = null) {
+		foreach ($this->opts as $opt) {
+			if ($opt[0] == $name) {
+				return $opt[1];
+			}
+			if ($name2 && $opt[0] == $name2) {
+				return $opt[1];
+			}
+		}
+	}
+
+	// Get the first option parameter for a given option name
+	// Finds all occurances of an option
+	// Optionally checks a second name
+	//
+	public function getAllOptionValues($name, $name2 = null) {
+		$ret = array();
+		foreach ($this->opts as $opt) {
+			if ($opt[0] == $name) {
+				$ret[] = $opt[1];
+			}
+			if ($name2 && $opt[0] == $name2) {
+				$ret[] = $opt[1];
+			}
+		}
+		return $ret;
+	}
+
+	// Get all option parameters for a given option name
+	// Only finds the first occurance of an option
+	// Optionally checks a second name
+	//
+	public function getOptionAllValues($name, $name2 = null) {
+		foreach ($this->opts as $opt) {
+			if ($opt[0] == $name) {
+				return array_slice($opt, 1);
+			}
+			if ($name2 && $opt[0] == $name2) {
+				return array_slice($opt, 1);
+			}
+		}
+	}
+
+	// Get the n-th argument
+	//
+	public function getArgument($n)
+	{
+		if (isset($this->args[$n])) return $this->args[$n];
+		return '';
+	}
+}

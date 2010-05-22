@@ -1,0 +1,172 @@
+<?php
+// $Id$
+
+/**
+ * @file
+ *
+ * This is a template for creating a Drupal module to extend fedora_rest
+ * for your own custom content-type.  To create a module, copy this to a
+ * new module folder, renamed as <custom>.module (where <custom> is the
+ * name of your new module).  Also create a <custom>.info file and, if
+ * you need to store any information about fedora objects beyond what
+ * fedora_rest stores, a <custom>.install file.
+ *
+ * In this module file, set the name of your object node type and change
+ * all the function names from 'template_' to the name of your module.
+ * Replace or add to the calls to fedora_rest methods in each function to
+ * override or extend the original behaviour.
+ *
+ * Be sure to add your node types info in all the fields of the array
+ * created in hook_node_info()
+ */
+
+
+/**
+ * define constants used by this module
+ */
+// Node type for this module's Fedora object nodes
+define('TEMPLATE_NODE', 'template_object');
+define('TEMPLATE_FORM', 'template_object_node_form');
+
+
+/**
+ * Implementation of hook_node_info().
+ */
+function template_node_info() {
+
+    return array(
+        TEMPLATE_NODE => array(
+            'name' => t('Custom Object'),
+            'module' => 'custom',
+            'description' => t('A <em>Custom object</em> links to an object in a Fedora repository.'),
+            'has_title' => TRUE,
+            'title_label' => 'Title',
+            'has_body' => TRUE,
+            'body_label' => '',
+        )
+    );
+}
+
+
+/**
+ * Implementation of hook_form()
+ *
+ */
+function template_form($node) {
+
+    return fedora_rest_form($node);
+}
+
+
+/**
+ * Implementation of hook_alter()
+ *
+ */
+function template_form_alter(&$form, $form_state, $form_id) {
+
+    fedora_rest_form_alter($form, $form_state, $form_id, TEMPLATE_FORM);
+
+}
+
+/**
+ * Implementation of hook_validate()
+ *
+ */
+function template_validate($node) {
+
+    fedora_rest_validate($node);
+
+}
+
+/**
+ * Implementation of hook_load()
+ *
+ */
+function template_load($node) {
+
+    return fedora_rest_load($node);
+
+}
+
+/**
+ * Implementation of hook_view()
+ *
+ */
+function template_view($node, $teaser = FALSE, $page = FALSE) {
+
+    return fedora_rest_view($node, $teaser, $page);
+
+}
+
+
+/**
+ * Implementation of hook_insert()
+ */
+function template_insert($node) {
+
+    /**
+     * If you don't call fedora_rest_insert, the fedora_rest_* table
+     * rows will not be created for this node and your node type will
+     * not behave like a fedora_object node.
+     */
+    fedora_rest_insert($node);
+
+}
+
+/**
+ * Implementation of hook_update()
+ *
+ */
+function template_update($node) {
+
+    fedora_rest_update($node);
+
+}
+
+/**
+ * Implementation of hook_delete()
+ *
+ */
+function template_delete($node) {
+
+    fedora_rest_delete($node);
+
+}
+
+/**
+ * Implementation of hook_nodeapi()
+ *
+ */
+function template_nodeapi(&$node, $op, $arg3=NULL, $arg4=NULL) {
+
+    if ($node->type==TEMPLATE_NODE && $op == 'presave') {
+        // fedora_rest module will retrieve metadata from repository if:
+        // op==presave &&
+        // arg3==FEDORA_REST_NODE
+        fedora_rest_nodeapi($node, $op, FEDORA_REST_NODE);
+    }
+}
+
+/**
+ * Implementation of hook_perm()
+ *
+ */
+function template_perm( ) {
+
+    // fedora_rest will register permissions,
+    // which template_access will reference
+    return NULL;
+
+}
+
+
+/**
+ * Implementation of hook_access()
+ *
+ */
+function template_access($op, $node, $account) {
+
+    return fedora_rest_access($op, $node, $account);
+
+}
+

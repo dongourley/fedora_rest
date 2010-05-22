@@ -1,0 +1,1174 @@
+<?php
+// $Id$
+
+/**
+ * @file
+ *
+ * PHP methods for invoking Fedora REST application programming interfaces
+ */
+
+class FedoraClient {
+
+    // REST endpoints...these should work for most Fedora installs,
+    // but can be overridden by set methods
+    protected $API_REST = '/objects';
+    protected $RISEARCH_REST = '/risearch';
+
+    // Fedora server connection parameters (set in constructor)
+    protected $server=NULL;
+    protected $usernm=NULL;
+    protected $userpw=NULL;
+    protected $version=NULL;
+
+    // Handle REST API version differences
+    public $API_EXPERIMENTAL = array('3.0' => 1, '3.1' => 1);
+    public $API_BETA = array('3.2' => 1, '3.3' => 1);
+    public $API_FINAL = array( );
+
+    // Session object for API list methods
+    protected $session=NULL;
+
+
+    /**
+     * Class constructor :: set up parameters to connect to repository
+     *
+     */
+    public function __construct($svr = 'http://localhost:8080/fedora',
+                                $nm = 'fedoraAdmin', $pw = 'fedoraAdmin',
+                                $version = '3.1')
+    {
+        // initialize class variables
+        $this->server = $svr;
+        $this->usernm = $nm;
+        $this->userpw = $pw;
+        $this->version = $version;
+
+    }
+
+
+    public function getServer()
+    {
+        return $this->server;
+    }
+
+    public function getSession()
+    {
+        return $this->session;
+    }
+
+    public function setServer( $svr )
+    {
+        $this->server = $svr;
+    }
+
+    public function setUser( $nm, $pw )
+    {
+        $this->usernm = $nm;
+        $this->userpw = $pw;
+    }
+
+    public function setVersion( $version )
+    {
+        $this->version = $version;
+    }
+
+    public function setApiEndpoint( $ep )
+    {
+        $this->API_REST = $ep;
+    }
+
+    public function setRIsearchEndpoint( $ep )
+    {
+        $this->RISEARCH_REST = $ep;
+    }
+
+/** METHODS TO ACCESS THE REST API-A **/
+
+    /**
+     * Invoke the API-A findObjects web service
+     *
+     * @return array of SimpleXMLElement objects
+     */
+    public function findObjects($args=array())
+    {
+        // make sure that any errors are handled by throwing an exception
+        set_error_handler(array(&$this, 'fedoraClientErrorHandler'));
+
+        $query = $this->server . $this->API_REST . '?pid=true&';
+        if (isset($this->API_EXPERIMENTAL[$this->version])) {
+            $query .= 'format=xml';
+        } else {
+            $query .= 'resultFormat=xml';
+        }
+        foreach( $args as $parm => $value ) {
+            if ($parm != 'pid') {
+                $query .= '&' . urlencode($parm) . '=' . urlencode($value);
+            }
+        }
+
+        try {
+            $result = $this->getRestXML($query);
+        } catch (Exception $e) {
+            restore_error_handler();
+            // re-throw it to the invoker
+            throw $e;
+        }
+
+        if (isset($result->listSession)) {
+            $this->session = $result->listSession;
+        } else {
+            $this->session = NULL;
+        }
+
+        $sxeList = array();
+        foreach($result->resultList->objectFields as $node) {
+            // why the key has to be cast? ...otherwise get illegal offset
+            $sxeList[(string)$node->pid] = $node;
+        }
+
+        restore_error_handler();
+        return $sxeList;
+    }
+
+
+    /**
+     * Invoke the API-A getDatastreamDissemination web service
+     *
+     * @return SimpleXMLElement object or binary data
+     */
+    public function getDatastreamDissemination( $pid,$dsID,$binary=FALSE,
+                                                $asOfDateTime=NULL )
+    {
+        // make sure that any errors are handled by throwing an exception
+        set_error_handler(array(&$this, 'fedoraClientErrorHandler'));
+
+        $query = $this->server . $this->API_REST . "/$pid/datastreams/$dsID";
+        if (! isset($this->API_EXPERIMENTAL[$this->version])) {
+            $query .= '/content';
+        }
+        if (isset($asOfDateTime)) {
+            $query .= '?asOfDateTime=' . urlencode($asOfDateTime);
+        }
+
+        try {
+            if ($binary) {
+                $data = $this->getRestBinary($query);
+                restore_error_handler();
+                return $data;
+            }
+            $sxe = $this->getRestXML($query);
+        } catch (Exception $e) {
+            restore_error_handler();
+            throw $e;
+        }
+
+        restore_error_handler();
+        return $sxe;
+    }
+
+
+    /**
+     * Invoke the API-A getDissemination web service
+     *
+     * @return SimpleXMLElement object or binary data
+     */
+    public function getDissemination( $pid, $sdefPid, $method, $binary=FALSE )
+    {
+        // make sure that any errors are handled by throwing an exception
+        set_error_handler(array(&$this, 'fedoraClientErrorHandler'));
+
+        $query = $this->server . $this->API_REST
+                . "/$pid/methods/$sdefPid/$method";
+
+        try {
+            if ($binary) {
+                $data = $this->getRestBinary($query);
+                restore_error_handler();
+                return $data;
+            }
+            $sxe = $this->getRestXML($query);
+        } catch (Exception $e) {
+            restore_error_handler();
+            throw $e;
+        }
+
+        restore_error_handler();
+        return $sxe;
+    }
+
+
+    /**
+     * Invoke a web service to retrieve an XML dissemination
+     *
+     * @return SimpleXMLElement object
+     */
+    public function getXMLDissemination( $pid, $service )
+    {
+        // make sure that any errors are handled by throwing an exception
+        set_error_handler(array(&$this, 'fedoraClientErrorHandler'));
+
+        $query = $this->server . $this->API_REST . "/$pid/$service";
+
+        try {
+            $sxe = $this->getRestXML($query);
+        } catch (Exception $e) {
+            restore_error_handler();
+            throw $e;
+        }
+
+        restore_error_handler();
+        return $sxe;
+    }
+
+
+    /**
+     * Invoke the API-A getObjectHistory web service
+     *
+     * @return array of SimpleXMLElement objects
+     */
+    public function getObjectHistory($pid)
+    {
+        // make sure that any errors are handled by throwing an exception
+        set_error_handler(array(&$this, 'fedoraClientErrorHandler'));
+
+        $query = $this->server . $this->API_REST . "/$pid/versions?format=xml";
+
+        try {
+            $fedoraObjectHistory = $this->getRestXML($query);
+        } catch (Exception $e) {
+            restore_error_handler();
+            throw $e;
+        }
+
+        $sxeList = array();
+        foreach($fedoraObjectHistory->objectChangeDate as $date) {
+            $sxeList[(string)$date] = $date;
+        }
+
+        restore_error_handler();
+        return $sxeList;
+    }
+
+
+    /**
+     * Invoke the API-A getObjectProfile web service
+     *
+     * @return SimpleXMLElement object
+     */
+    public function getObjectProfile($pid)
+    {
+        // make sure that any errors are handled by throwing an exception
+        set_error_handler(array(&$this, 'fedoraClientErrorHandler'));
+
+        $query = $this->server . $this->API_REST . "/$pid?format=xml";
+
+        try {
+            $sxe = $this->getRestXML($query);
+        } catch (Exception $e) {
+            restore_error_handler();
+            throw $e;
+        }
+
+        restore_error_handler();
+        return $sxe;
+    }
+
+
+    /**
+     * Invoke the API-A listDatastreams web service
+     *
+     * @return array of SimpleXMLElement objects
+     */
+    public function listDatastreams($pid,$asOfDateTime=NULL)
+    {
+        // make sure that any errors are handled by throwing an exception
+        set_error_handler(array(&$this, 'fedoraClientErrorHandler'));
+
+        $query = $this->server . $this->API_REST."/$pid/datastreams?format=xml";
+        if (isset($asOfDateTime)) {
+            $query .= '&asOfDateTime=' . urlencode($asOfDateTime);
+        }
+
+        try {
+            $objectDatastreams = $this->getRestXML($query);
+        } catch (Exception $e) {
+            restore_error_handler();
+            throw $e;
+        }
+
+        $sxeList = array();
+        foreach($objectDatastreams->datastream as $ds) {
+            if (isset($ds['dsid'])) {
+                $sxeList[(string)$ds['dsid']] = $ds;
+            }
+        }
+
+        restore_error_handler();
+        return $sxeList;
+    }
+
+
+    /**
+     * Invoke the API-A listMethods web service
+     *
+     * @return array of SimpleXMLElement objects
+     */
+    public function listMethods($pid, $asOfDateTime=NULL)
+    {
+        // make sure that any errors are handled by throwing an exception
+        set_error_handler(array(&$this, 'fedoraClientErrorHandler'));
+
+        $query = $this->server . $this->API_REST . "/$pid/methods?format=xml";
+        if (isset($asOfDateTime)) {
+            $query .= '&asOfDateTime=' . urlencode($asOfDateTime);
+        }
+
+        try {
+            $objectMethods = $this->getRestXML($query);
+        } catch (Exception $e) {
+            restore_error_handler();
+            throw $e;
+        }
+
+        $sxeList = array();
+        foreach($objectMethods->sDef->method as $method) {
+            if (isset($method['name'])) {
+                $sxeList[(string)$method['name']] = $method;
+            }
+        }
+
+        restore_error_handler();
+        return $sxeList;
+    }
+
+
+    /**
+     * Invoke the API-A resumeFindObjects web service
+     *
+     * @return array of SimpleXMLElement objects
+     */
+    public function resumeFindObjects($args=array())
+    {
+        // make sure that any errors are handled by throwing an exception
+        set_error_handler(array(&$this, 'fedoraClientErrorHandler'));
+
+        if (isset($this->session)) {
+
+            $args['sessionToken'] = $this->session->token;
+            restore_error_handler();
+            return $this->findObjects($args);
+
+        } else {
+            throw new Exception('No session token for resumeFindObjects()!');
+        }
+
+        restore_error_handler();
+        return $sxeList;
+    }
+
+/** METHODS TO ACCESS THE REST API-M **/
+
+    /**
+     * Invoke the API-M addDatastream web service
+     *
+     * @return SimpleXMLElement object
+     */
+    public function addDatastream($pid, $dsID, $args=array(),
+                                  $managedFile=NULL, $inlineXML=NULL)
+    {
+        // make sure that any errors are handled by throwing an exception
+        set_error_handler(array(&$this, 'fedoraClientErrorHandler'));
+
+        $url = $this->server . $this->API_REST . "/$pid/datastreams/$dsID";
+
+        $fields = '';
+        foreach( $args as $parm => $value ) {
+            if ($fields) $fields .= '&';
+            $fields .= "$parm=$value";
+        }
+        if ($fields) $url .= '?'.$fields;
+
+        if (isset($managedFile)) {
+            $fields = array();
+            $fields[basename($managedFile)]="@$managedFile";
+        } elseif (isset($inlineXML)) {
+            // ** NOT TESTED **
+            $fields = $inlineXML;
+        }
+
+        try {
+            //$resp = $this->postRestXML($url, $fields, TRUE);
+            $resp = $this->postRestFile($url, $fields, TRUE);
+        } catch (Exception $e) {
+            restore_error_handler();
+            throw $e;
+        }
+
+        restore_error_handler();
+        return $resp;
+    }
+
+    /**
+     * Invoke the API-M getObjectXML web service
+     *
+     * @return SimpleXMLElement object
+     */
+    public function getObjectXML($pid)
+    {
+        // make sure that any errors are handled by throwing an exception
+        set_error_handler(array(&$this, 'fedoraClientErrorHandler'));
+
+        $query = $this->server . $this->API_REST . "/$pid/objectXML";
+
+        try {
+            $sxe = $this->getRestXML($query, TRUE);
+            //$sxe = $this->getRestBinary($query, TRUE);
+        } catch (Exception $e) {
+            restore_error_handler();
+            throw $e;
+        }
+
+        restore_error_handler();
+        return $sxe;
+    }
+
+    /**
+     * Invoke the API-M getNextPID web service
+     *
+     * @return SimpleXMLElement object
+     */
+    public function getNextPID($ns=NULL, $num=1)
+    {
+        // make sure that any errors are handled by throwing an exception
+        set_error_handler(array(&$this, 'fedoraClientErrorHandler'));
+
+        $query = $this->server . $this->API_REST . "/nextPID?format=xml";
+        if (isset($num)) {
+            $query .= '&numPIDs=' . urlencode($num);
+        }
+        if (isset($ns)) {
+            $query .= '&namespace=' . urlencode($ns);
+        }
+
+        try {
+            $sxe = $this->postRestXML($query, NULL, TRUE);
+        } catch (Exception $e) {
+            restore_error_handler();
+            throw $e;
+        }
+
+        restore_error_handler();
+        return $sxe;
+    }
+
+    /**
+     * Invoke the API-M getDatastream web service
+     *
+     * @return String filepath
+     */
+    public function getDatastream( $pid, $dsID, $format='html',
+                            $validateChecksum=NULL, $asOfDateTime=NULL )
+    {
+        // make sure that any errors are handled by throwing an exception
+        set_error_handler(array(&$this, 'fedoraClientErrorHandler'));
+
+        $query = $this->server . $this->API_REST
+                . "/$pid/datastreams/$dsID?format=$format";
+        if (isset($validateChecksum)) {
+            $query .= '&validateChecksum=' . urlencode($validateChecksum);
+        }
+        if (isset($asOfDateTime)) {
+            $query .= '&asOfDateTime=' . urlencode($asOfDateTime);
+        }
+
+        try {
+            $filepath = $pid . $dsID . ".$format";
+            $this->getRestFile($query, $filepath, TRUE);
+        } catch (Exception $e) {
+            restore_error_handler();
+            throw $e;
+        }
+
+        restore_error_handler();
+        return $filepath;
+    }
+
+    /**
+     * Invoke the API-M export web service
+     *
+     * @return String filepath
+     */
+    public function export( $pid, $format=NULL, $context=NULL, $encoding=NULL )
+    {
+        // make sure that any errors are handled by throwing an exception
+        set_error_handler(array(&$this, 'fedoraClientErrorHandler'));
+
+        $query = $this->server . $this->API_REST . "/$pid/export";
+
+        $fields = '';
+        if (isset($format)) {
+            if ($fields) $fields .= '&';
+            $fields .= '&format=' . urlencode($format);
+        }
+        if (isset($context)) {
+            if ($fields) $fields .= '&';
+            $fields .= '&context=' . urlencode($context);
+        }
+        if (isset($encoding)) {
+            if ($fields) $fields .= '&';
+            $fields .= '&encoding=' . urlencode($encoding);
+        }
+        $query .= '?'.$fields;
+
+        try {
+            // Do we need an extension for atom formats?
+            $filepath = "$pid.xml";
+            $this->getRestFile($query, $filepath, TRUE);
+        } catch (Exception $e) {
+            restore_error_handler();
+            throw $e;
+        }
+
+        restore_error_handler();
+        return $filepath;
+    }
+
+    /**
+     * Invoke the API-M ingest web service
+     *
+     * @return SimpleXMLElement object
+     */
+    public function ingest($pid='new', $args=array(), $object=NULL)
+    {
+        // ** NOT TESTED **
+
+        // make sure that any errors are handled by throwing an exception
+        set_error_handler(array(&$this, 'fedoraClientErrorHandler'));
+
+        $url = $this->server . $this->API_REST . "/$pid";
+        $fields = '';
+        foreach( $args as $parm => $value ) {
+            if ($fields) $fields .= '&';
+            $fields .= "$parm=$value";
+        }
+        $url .= '?'.$fields;
+
+        try {
+            $resp = $this->postRestXML($url, $object, TRUE);
+        } catch (Exception $e) {
+            restore_error_handler();
+            throw $e;
+        }
+
+        restore_error_handler();
+        return $resp;
+    }
+
+    /**
+     * Invoke the API-M modifyDatastream web service
+     *
+     * @return SimpleXMLElement object
+     */
+    public function modifyDatastream($pid, $dsID, $args=array(),
+                                    $modifiedFile=NULL, $curlWorkaround=NULL)
+    {
+        // make sure that any errors are handled by throwing an exception
+        set_error_handler(array(&$this, 'fedoraClientErrorHandler'));
+
+        $url = $this->server . $this->API_REST . "/$pid/datastreams/$dsID";
+
+        $mimeType = 'text/xml';
+
+        $fields = '';
+        foreach( $args as $parm => $value ) {
+            if ($fields) $fields .= '&';
+            $fields .= "$parm=$value";
+            if ($parm == 'mimeType') $mimeType = $value;
+        }
+        if ($fields) {
+            $url .= '?'.$fields;
+        }
+
+        try {
+            if (isset($curlWorkaround) ||
+                isset($this->API_EXPERIMENTAL[$this->version]))
+            {
+                $resp = $this->postRestFileWorkaround($url, $modifiedFile, TRUE,
+                                                    $mimeType, $curlWorkaround);
+            } else {
+                $fields = array();
+                $fields[basename($modifiedFile)]="@$modifiedFile";
+                $resp = $this->postRestFile($url, $fields, TRUE);
+            }
+        } catch (Exception $e) {
+            restore_error_handler();
+            throw $e;
+        }
+
+        restore_error_handler();
+        return $resp;
+    }
+
+    /**
+     * Invoke the API-M modifyObject web service
+     *
+     * @return SimpleXMLElement object
+     */
+    public function modifyObject($pid, $args=array())
+    {
+        // ** NOT TESTED **
+
+        // make sure that any errors are handled by throwing an exception
+        set_error_handler(array(&$this, 'fedoraClientErrorHandler'));
+
+        $url = $this->server . $this->API_REST . "/$pid";
+
+        $fields = '';
+        foreach( $args as $parm => $value ) {
+            if ($fields) $fields .= '&';
+            $fields .= "$parm=$value";
+        }
+        if ($fields) {
+            $url .= '?'.$fields;
+        }
+
+        try {
+            $resp = $this->putRestFile($url, NULL, TRUE);
+        } catch (Exception $e) {
+            restore_error_handler();
+            throw $e;
+        }
+
+        restore_error_handler();
+        return $resp;
+    }
+
+    /**
+     * Invoke the API-M purgeDatastream web service
+     *
+     * @return SimpleXMLElement object
+     */
+    public function purgeDatastream($pid, $dsID, $args=array())
+    {
+        // make sure that any errors are handled by throwing an exception
+        set_error_handler(array(&$this, 'fedoraClientErrorHandler'));
+
+        $url = $this->server . $this->API_REST . "/$pid/datastreams/$dsID";
+
+        $fields = '';
+        foreach( $args as $parm => $value ) {
+            if ($fields) $fields .= '&';
+            $fields .= "$parm=$value";
+        }
+        if ($fields) {
+            $url .= '?'.$fields;
+        }
+
+        try {
+            $resp = $this->deleteRest($url, TRUE);
+        } catch (Exception $e) {
+            restore_error_handler();
+            throw $e;
+        }
+
+        restore_error_handler();
+        return $resp;
+    }
+
+    /**
+     * Invoke the API-M purgeObject web service
+     *
+     * @return SimpleXMLElement object
+     */
+    public function purgeObject($pid, $args=array())
+    {
+        // ** NOT TESTED **
+
+        // make sure that any errors are handled by throwing an exception
+        set_error_handler(array(&$this, 'fedoraClientErrorHandler'));
+
+        $url = $this->server . $this->API_REST . "/$pid";
+
+        $fields = '';
+        foreach( $args as $parm => $value ) {
+            if ($fields) $fields .= '&';
+            $fields .= "$parm=$value";
+        }
+        if ($fields) {
+            $url .= '?'.$fields;
+        }
+
+        try {
+            $resp = $this->deleteRest($url, TRUE);
+        } catch (Exception $e) {
+            restore_error_handler();
+            throw $e;
+        }
+
+        restore_error_handler();
+        return $resp;
+    }
+
+    /**
+     * Invoke the API-M setDatastreamState web service
+     *
+     * @return SimpleXMLElement object
+     */
+    public function setDatastreamState($pid, $dsID, $dsState='A')
+    {
+        // ** NOT TESTED **
+
+        // make sure that any errors are handled by throwing an exception
+        set_error_handler(array(&$this, 'fedoraClientErrorHandler'));
+
+        $url = $this->server . $this->API_REST
+            . "/$pid/datastreams/$dsID?dsState=$dsState";
+
+        try {
+            $resp = $this->putRestFile($url, NULL, TRUE);
+        } catch (Exception $e) {
+            restore_error_handler();
+            throw $e;
+        }
+
+        restore_error_handler();
+        return $resp;
+    }
+
+    /**
+     * Invoke the API-M setDatastreamVersionable web service
+     *
+     * @return SimpleXMLElement object
+     */
+    public function setDatastreamVersionable($pid, $dsID, $versionable='true')
+    {
+        // ** NOT TESTED **
+
+        // make sure that any errors are handled by throwing an exception
+        set_error_handler(array(&$this, 'fedoraClientErrorHandler'));
+
+        $url = $this->server . $this->API_REST
+            . "/$pid/datastreams/$dsID?versionable=$versionable";
+
+        try {
+            $resp = $this->putRestFile($url, NULL, TRUE);
+        } catch (Exception $e) {
+            restore_error_handler();
+            throw $e;
+        }
+
+        restore_error_handler();
+        return $resp;
+    }
+
+
+/** METHODS TO ACCESS THE Resource Index Search API **/
+
+    /**
+     * Invoke the SPO RISearch web service
+     *
+     * @return array of SimpleXMLElement objects
+     */
+    public function findTriples($query, $limit=10)
+    {
+        // make sure that any errors are handled by throwing an exception
+        set_error_handler(array(&$this, 'fedoraClientErrorHandler'));
+
+        $url = $this->server . $this->RISEARCH_REST;
+        $fields = 'type=triples&lang=spo&format='.urlencode('RDF/XML')
+                . '&query='.urlencode($query);
+        if ($limit) {
+            $fields .= "&limit=$limit";
+        }
+
+        try {
+            $result = $this->postRestXML($url, $fields);
+        } catch (Exception $e) {
+            restore_error_handler();
+            // re-throw it to the invoker
+            throw $e;
+        }
+
+        // I can index this array with the unique URI because Mulgara will
+        // combine all assertions about a subject into one rdf:Description
+        $ns = $result->getNamespaces(false);
+        $sxeList = array();
+        foreach($result->xpath('rdf:Description') as $sxe) {
+            $attrs = $sxe->attributes($ns['rdf']);
+            $sxeList[(string)$attrs->about] = $sxe;
+        }
+
+        restore_error_handler();
+        return $sxeList;
+    }
+
+    /**
+     * Invoke the iTQL RISearch web service
+     *
+     * @return array of SimpleXMLElement objects
+     */
+    public function findTuples($query, $limit=10)
+    {
+        // make sure that any errors are handled by throwing an exception
+        set_error_handler(array(&$this, 'fedoraClientErrorHandler'));
+
+        $url = $this->server . $this->RISEARCH_REST;
+        $fields = 'type=tuples&lang=itql&format=Sparql'
+                . '&query='.urlencode($query);
+        if ($limit) {
+            $fields .= "&limit=$limit";
+        }
+
+        try {
+            $sparql = $this->postRestXML($url, $fields);
+        } catch (Exception $e) {
+            restore_error_handler();
+            // re-throw it to the invoker
+            throw $e;
+        }
+
+        $sxeList = array();
+        foreach($sparql->results->result as $sxe) {
+            $sxeList[] = $sxe;
+        }
+
+        restore_error_handler();
+        return $sxeList;
+    }
+
+
+/** PRIVATE UTILITY FUNCTIONS **/
+    /**
+     * for cURL lib usage see:
+     *  http://curl.haxx.se/libcurl/php/examples/
+     *  http://www.php.net/manual/en/book.curl.php
+     */
+
+    /**
+     * send a GET request to the REST API, expect XML back
+     */
+    protected function getRestXML($request, $auth=FALSE)
+    {
+        $get = curl_init( $request );
+        curl_setopt($get, CURLOPT_HEADER, 0); 
+        curl_setopt($get, CURLOPT_RETURNTRANSFER, 1); 
+        if ($auth) {
+            curl_setopt($get, CURLOPT_HTTPAUTH, CURLAUTH_ANY);
+            curl_setopt($get, CURLOPT_USERPWD, $this->usernm.':'.$this->userpw);
+            curl_setopt($get, CURLOPT_SSL_VERIFYPEER, FALSE);
+            curl_setopt($get, CURLOPT_SSL_VERIFYHOST, FALSE);
+        }
+        $response = curl_exec($get);
+        $info = curl_getinfo($get);
+        curl_close($get);
+
+        // Check HTTP/S response
+        if ((!isset($info['http_code'])) ||
+            $info['http_code'] < 200 || $info['http_code'] > 299)
+        {
+            throw new Exception("Unsuccessful request-->$response<--",
+                        ( isset($info['http_code']) )? $info['http_code'] : 0);
+        }
+        if ( ! (isset($info['content_type']) &&
+                $this->isXMLContentType($info['content_type'])) )
+        {
+            throw new Exception('Unexpected response='.$info['content_type']
+                                ."-->$response<--", $info['http_code']);
+        }
+
+        // DON'T work (if remote DTD specified):
+        // return new SimpleXMLElement($response);
+
+        // Note that without LIBXML_DTDLOAD we would get the SAME error as
+        //  with SimpleXMl (but thrown by the DOM library)
+        //  i.e. LIBXML_DTDLOAD is required to force DOM to load the DTD,
+        //  luckily the DTD does not have to be local.
+        
+        $dom = new DOMDocument();
+        $dom->loadXML($response, LIBXML_DTDLOAD);
+        
+        return simplexml_import_dom($dom);
+    }
+
+    /**
+     * send a GET request to the REST API, expect binary back
+     */
+    protected function getRestBinary($request, $auth=FALSE)
+    {
+        $get = curl_init( $request );
+        curl_setopt($get, CURLOPT_HEADER, 0); 
+        curl_setopt($get, CURLOPT_RETURNTRANSFER, 1); 
+        curl_setopt($get, CURLOPT_BINARYTRANSFER, 1); 
+        if ($auth) {
+            curl_setopt($get, CURLOPT_HTTPAUTH, CURLAUTH_ANY);
+            curl_setopt($get, CURLOPT_USERPWD, $this->usernm.':'.$this->userpw);
+            curl_setopt($get, CURLOPT_SSL_VERIFYPEER, FALSE);
+            curl_setopt($get, CURLOPT_SSL_VERIFYHOST, FALSE);
+        }
+        $data = curl_exec($get);
+        $info = curl_getinfo($get);
+        curl_close($get);
+
+        // Check HTTP/S response
+        if ((!isset($info['http_code'])) ||
+            $info['http_code'] < 200 || $info['http_code'] > 299)
+        {
+            throw new Exception('Unsuccessful request',
+                        ( isset($info['http_code']) )? $info['http_code'] : 0);
+        }
+
+        return $data;
+    }
+
+    /**
+     * send a GET request to the REST API, store response in a file
+     */
+    protected function getRestFile($request, $filepath, $auth=FALSE)
+    {
+        $fp = fopen($filepath, "w");
+
+        $get = curl_init( $request );
+        curl_setopt($get, CURLOPT_HEADER, 0); 
+        curl_setopt($get, CURLOPT_RETURNTRANSFER, 1); 
+        curl_setopt($get, CURLOPT_BINARYTRANSFER, 1); 
+        curl_setopt($get, CURLOPT_FILE, $fp); 
+        if ($auth) {
+            curl_setopt($get, CURLOPT_HTTPAUTH, CURLAUTH_ANY);
+            curl_setopt($get, CURLOPT_USERPWD, $this->usernm.':'.$this->userpw);
+            curl_setopt($get, CURLOPT_SSL_VERIFYPEER, FALSE);
+            curl_setopt($get, CURLOPT_SSL_VERIFYHOST, FALSE);
+        }
+        $response = curl_exec($get);
+        $info = curl_getinfo($get);
+        curl_close($get);
+
+        // Check HTTP/S response
+        if ((!isset($info['http_code'])) ||
+            $info['http_code'] < 200 || $info['http_code'] > 299)
+        {
+            throw new Exception("Unsuccessful request-->$response<--",
+                        ( isset($info['http_code']) )? $info['http_code'] : 0);
+        }
+
+        return $response;
+    }
+
+    /**
+     * send a POST request to the REST API, expect XML back
+     */
+    protected function postRestXML($url, $fields, $auth=FALSE)
+    {
+        $post = curl_init($url);
+        curl_setopt($post, CURLOPT_HEADER, 0); 
+        curl_setopt($post, CURLOPT_RETURNTRANSFER, 1); 
+        curl_setopt($post, CURLOPT_POST, 1);
+        if (isset($fields)) curl_setopt($post, CURLOPT_POSTFIELDS, $fields);
+        if ($auth) {
+            curl_setopt($post,CURLOPT_HTTPAUTH, CURLAUTH_ANY);
+            curl_setopt($post,CURLOPT_USERPWD, $this->usernm.':'.$this->userpw);
+            curl_setopt($post,CURLOPT_SSL_VERIFYPEER, FALSE);
+            curl_setopt($post,CURLOPT_SSL_VERIFYHOST, FALSE);
+        }
+
+        $response = curl_exec($post);
+        $info = curl_getinfo($post);
+        curl_close($post);
+
+        // Check HTTP/S response
+        if ((!isset($info['http_code'])) ||
+            $info['http_code'] < 200 || $info['http_code'] > 299)
+        {
+            throw new Exception("Unsuccessful request-->$response<--",
+                        ( isset($info['http_code']) )? $info['http_code'] : 0);
+        }
+        if ( ! (isset($info['content_type']) &&
+                $this->isXMLContentType($info['content_type'])) )
+        {
+            throw new Exception('Unexpected response='.$info['content_type']
+                                ."-->$response<--", $info['http_code']);
+        }
+
+        return new SimpleXMLElement($response);
+    }
+
+    /**
+     * send a POST FILE request to the REST API
+     */
+    protected function postRestFile($url, $fields, $auth=FALSE)
+    {
+        $post = curl_init($url);
+        curl_setopt($post, CURLOPT_HEADER, 0); 
+        curl_setopt($post, CURLOPT_RETURNTRANSFER, 1); 
+        curl_setopt($post, CURLOPT_POST, 1);
+        if (isset($fields)) curl_setopt($post, CURLOPT_POSTFIELDS, $fields);
+        if ($auth) {
+            curl_setopt($post,CURLOPT_HTTPAUTH, CURLAUTH_ANY);
+            curl_setopt($post,CURLOPT_USERPWD, $this->usernm.':'.$this->userpw);
+            curl_setopt($post,CURLOPT_SSL_VERIFYPEER, FALSE);
+            curl_setopt($post,CURLOPT_SSL_VERIFYHOST, FALSE);
+        }
+
+        $response = curl_exec($post);
+        $info = curl_getinfo($post);
+        curl_close($post);
+
+        // Check HTTP/S response (should always be 201 - Created?)
+        if ((!isset($info['http_code'])) ||
+            $info['http_code'] < 200 || $info['http_code'] > 299)
+        {
+            throw new Exception("Unsuccessful request-->$response<--",
+                        ( isset($info['http_code']) )? $info['http_code'] : 0);
+        }
+
+        return $response;
+    }
+
+    /**
+     * send a POST FILE request to the REST API
+     *
+     * Note: this uses the curl shell command rather than libcurl because
+     *      I can't figure out how to use putRestFile() for Fedora API-M
+     *      and PHP/libcurl has a bug that prevents specifying the XML
+     *      MIME type when I try a multipart/form-data post (postRestFile)
+     *      [ see http://osdir.com/ml/web.curl.php/2007-12/msg00033.html ]
+     *      Fedora 3.3 will allow use of mimeType parameter with REST API,
+     *      which should make postRestFile work, but in the meantime I
+     *      need to use this, which will not work if the curl command is
+     *      not installed.
+     */
+    protected function postRestFileWorkaround($url, $filepath, $auth=FALSE,
+                                            $contentType, $curlPath)
+    {
+        $post = "$curlPath -i -H 'Content-type: $contentType' -XPOST '$url'";
+        if ($auth) {
+            $post .= ' -s -S -k -u "'.$this->usernm.':'.$this->userpw.'"';
+        }
+        if ($filepath) {
+            $post .= " --data-binary '@".$filepath."'";
+        }
+        $post .= ' 2>&1';
+
+        $cmd = str_replace($this->userpw, '********', $post);
+        //print 'DEBUG: ' . $post . "\n";
+
+        exec($post, $out, $err);
+
+        if ($err) {
+            throw new Exception("Command failed-->".join("\n",$out)
+                                ."<--\nCommand: $cmd\n", $err);
+        }
+
+        // Check HTTP/S response (should always be 201 - Created?)
+        // HTTP/1.1 201 Created
+        list($protocol, $http_code, $mess) = explode(' ', $out[0], 3);
+        if ($http_code == 100) {
+            foreach ($out as $line) {
+                $words = explode(' ', $line);
+                if ($words[0] == 'HTTP/1.1') $http_code = $words[1];
+            }
+        }
+        if ($http_code < 200 || $http_code > 299) {
+            throw new Exception("Unsuccessful request-->".join("\n",$out)."<--",
+                                $http_code);
+        }
+
+        return join("\n",$out);
+    }
+
+    /**
+     * send a PUT FILE request to the REST API
+     */
+    protected function putRestFile($url, $filepath, $auth=FALSE)
+    {
+        // Note: this gets a 401 (Unauthorized?) error when I tested it
+        //      with the DHO repository
+        $put = curl_init($url);
+        curl_setopt($put, CURLOPT_HEADER, 0); 
+        curl_setopt($put, CURLOPT_RETURNTRANSFER, 1); 
+        curl_setopt($put, CURLOPT_PUT, 1);
+        if (isset($filepath)) {
+            $fp = fopen($filepath, "r");
+            curl_setopt($put, CURLOPT_INFILE, $fp);
+            curl_setopt($put, CURLOPT_INFILESIZE, filesize($filepath));
+        }
+        if ($auth) {
+            curl_setopt($put,CURLOPT_HTTPAUTH, CURLAUTH_ANY);
+            curl_setopt($put,CURLOPT_USERPWD, $this->usernm.':'.$this->userpw);
+            curl_setopt($put,CURLOPT_SSL_VERIFYPEER, FALSE);
+            curl_setopt($put,CURLOPT_SSL_VERIFYHOST, FALSE);
+        }
+
+        $response = curl_exec($put);
+        $info = curl_getinfo($put);
+        curl_close($put);
+
+        // Check HTTP/S response (should always be 201 - Created?)
+        if ((!isset($info['http_code'])) ||
+            $info['http_code'] < 200 || $info['http_code'] > 299)
+        {
+            throw new Exception("Unsuccessful request-->$response<--",
+                        ( isset($info['http_code']) )? $info['http_code'] : 0);
+        }
+
+        return $response;
+    }
+
+    /**
+     * send a DELETE request to the REST API
+     */
+    protected function deleteRest($url, $auth=FALSE)
+    {
+        $del = curl_init($url);
+        curl_setopt($del, CURLOPT_HEADER, 0); 
+        curl_setopt($del, CURLOPT_RETURNTRANSFER, 1); 
+        curl_setopt($del, CURLOPT_CUSTOMREQUEST, 'DELETE');
+        if ($auth) {
+            curl_setopt($del,CURLOPT_HTTPAUTH, CURLAUTH_ANY);
+            curl_setopt($del,CURLOPT_USERPWD,$this->usernm.':'.$this->userpw);
+            curl_setopt($del,CURLOPT_SSL_VERIFYPEER, FALSE);
+            curl_setopt($del,CURLOPT_SSL_VERIFYHOST, FALSE);
+        }
+
+        $response = curl_exec($del);
+        $info = curl_getinfo($del);
+        curl_close($del);
+
+        // Check HTTP/S response
+        if ((!isset($info['http_code'])) ||
+            $info['http_code'] < 200 || $info['http_code'] > 299)
+        {
+            throw new Exception("Unsuccessful request-->$response<--",
+                        ( isset($info['http_code']) )? $info['http_code'] : 0);
+        }
+
+        return $response;
+    }
+
+
+    /**
+     * Check whether an HTTP content type indicates XML or not
+     */
+    function isXMLContentType($typestr)
+    {
+        list($type, $subtype) = explode('/', $typestr, 2);
+        if ($type == 'application' || $type == 'text') {
+            if ($subtype == 'xml') return TRUE;
+            if (strrpos($subtype,'+xml') !== FALSE) return TRUE;
+        }
+        return FALSE;
+    }
+
+
+    /**
+     * Handle errors that occur in the object by throwing an exception
+     * 
+     * Every public method will set this error handler when it starts.
+     * Every invocation of a method should be in a try/catch block.
+     */
+    function fedoraClientErrorHandler($errno, $errstr, $errfile, $errline)
+    {
+        throw new ErrorException($errstr, 0, $errno, $errfile, $errline);
+    }
+
+}
+

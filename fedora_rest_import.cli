@@ -1,0 +1,156 @@
+<?php
+// $Id$
+
+/**
+ * fedora_rest_import.cli:
+ *  command line script to import a Fedora collection into Drupal
+ *  // part of the fedora_rest module //
+ *  importing a collection may take too long to do through web interface
+ */
+
+// get current location
+$module_directory = dirname(__FILE__);
+
+$import = "$module_directory/fedora_rest_admin.inc";
+if (! file_exists($import)) die("Required include file not found: $import\n");
+require_once($import);
+
+/***********************************************************************
+ * Get command line arguments
+ */
+
+$class = "$module_directory/CLIArguments.class";
+if (! file_exists($class)) die("Required class file not found: $class\n");
+require_once($class);
+
+$opts = array('d', 'f=', 'h', 'l=', 's=');
+$lopts = array(
+    'delete',
+    'folder',
+    'help',
+    'limit=',
+    'settings=',
+);
+$args = new CLIArguments( $opts, $lopts );
+
+if ($args->isOptionSet('h', 'help')) show_help();
+
+// Collect & check site specific variables
+if (! ($config = $args->getOptionValue('s', 'settings')) ) {
+    $config = "$module_directory/cli_settings.php";
+}
+if (! file_exists($config)) die("Required config file not found: $config\n");
+require_once($config);
+if (! $site_directory) die("Required setting not defined: site_directory\n");
+if (! $site_url) die("Required setting not defined: site_url\n");
+
+// get the other command line args
+if ( ($folder = $args->getOptionValue('f', 'folder')) ) {
+    $drupal_base_url = parse_url("$site_url/$folder");
+    $drupal_directory= "$site_directory/$folder";
+} else {
+    $drupal_base_url = parse_url($site_url);
+    $drupal_directory= $site_directory;
+}
+if (! ($resLimit = $args->getOptionValue('l', 'limit')) ) {
+    $resLimit = 0;    // zero means no limit
+}
+
+
+/***********************************************************************
+ * Bootstrap Drupal system for this script
+ */
+chdir($drupal_directory);
+
+$_SERVER['HTTP_HOST'] = $drupal_base_url['host'];
+$_SERVER['PHP_SELF'] = $drupal_base_url['path'].'/index.php';
+$_SERVER['REQUEST_URI'] = $_SERVER['SCRIPT_NAME'] = $_SERVER['PHP_SELF'];
+$_SERVER['REMOTE_ADDR'] = NULL;
+$_SERVER['REQUEST_METHOD'] = NULL;
+
+require_once 'includes/bootstrap.inc';
+drupal_bootstrap(DRUPAL_BOOTSTRAP_FULL);
+
+global $fedora_rest_import_messages;
+global $user;
+$username = 'admin';
+$user = user_load(array('name' => $username));
+if ($user === FALSE) die("Unable to load user $username\n");
+
+// get settings from fedora_rest variables
+$server = variable_get( 'fedora_rest_server_arg',
+                            'http://localhost:8080/fedora' );
+$version = variable_get( 'fedora_rest_version_arg', '3.1' );
+$collection = variable_get( 'fedora_rest_collection_arg',
+                            'drupal:ImportCollection' );
+$predicate = variable_get( 'fedora_rest_predicate_arg',
+                            'fedora-model:hasModel' );
+$object = variable_get( 'fedora_rest_object_arg',
+                            'info:fedora/dhocm:DoegenRecord' );
+$ntype = variable_get('fedora_rest_nt_arg', 'fedora_object' );
+$format = variable_get('fedora_rest_format', 0);
+$nuser = variable_get('fedora_rest_owner_arg', 'admin' );
+$urow = db_fetch_object(db_query("SELECT uid FROM {users} WHERE name='%s'",$nuser));
+if (is_object($urow)) {
+    $nuid = $urow->uid;
+} else {
+    print("WARNING: user '$nuser' not found; nodes will be owned by 'admin'.\n");
+    $nuid = 1;
+}
+
+echo "Command line interface to import Fedora objects.\n";
+echo "\n";
+echo "Import Parameters:\n";
+echo "    Collection URI:   $collection\n";
+echo "    Repository URL:   $server\n";
+echo "    Repository API:   $version\n";
+echo "    SPO Predicate:    $predicate\n";
+echo "    SPO Object:       $object\n";
+echo "    Drupal Node Type: $ntype\n";
+echo "    Node Author:      $nuser ($nuid)\n";
+echo "    Input Format:     $format\n";
+echo "    Delete Flag:      ".$args->isOptionSet('d', 'delete')."\n";
+echo "    Object Limit:     ".($resLimit ? $resLimit : 'none')."\n";
+echo "\n";
+
+$rtn = fedora_rest_import_items($server,$collection,$predicate,$object,$ntype,
+                                $nuid, $args->isOptionSet('d', 'delete'),
+                                $resLimit, $format, $version);
+
+foreach ($fedora_rest_import_messages as $message) {
+    print $message;
+}
+
+if ($rtn === FALSE) {
+    print "** IMPORT ABORTED **\n";
+    exit(1);
+}
+
+
+/********************  End of main()  **********************************/
+
+
+/**
+ * Display program information
+ */
+function show_help($andExit=TRUE) {
+
+    echo "Command line interface to import Fedora objects.\n";
+    echo "\n";
+    echo "Usage:\n";
+    echo "  php fedora_rest_import.cli [options]\n";
+    echo "\n";
+    echo "Options:\n";
+    echo "  -c, --collection <uri>   ID for this import set\n";
+    echo "  -d, --delete             Delete all object nodes before import\n";
+    echo "  -f, --folder <subdir>    Sub-directory folder for multi-sites\n";
+    echo "  -h, --help               Display this message\n";
+    echo "  -l, --limit <n>          Only import n objects\n";
+    echo "  -s, --settings <path>    Path to alternative cli_settings.php\n";
+    echo "\n";
+    echo "<n> is an integer; default 0 means no limit\n";
+
+    if ($andExit) exit();
+}
+
+?>
