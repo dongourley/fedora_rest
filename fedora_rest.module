@@ -491,7 +491,7 @@ function fedora_rest_nodeapi(&$node, $op, $parent_type=NULL, $arg4=NULL) {
                     foreach(taxonomy_get_vocabularies($node->type) as $v) {
                         $varg = 'fedora_rest_'
                                 . str_replace(' ','_',$v->name) . '_arg';
-                        $xpath = isset($node->{$varg}) ? $node->{$varg} : '';
+                        $xpath = variable_get($varg, '');
                         if ($xpath) {
                             $s = preg_split('/[\s]+/', $xpath, 2);
                             if ($s[1]) {

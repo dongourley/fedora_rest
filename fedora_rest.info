@@ -4,5 +4,5 @@ description = "Programming interface to invoke Fedora Commons REST methods"
 package = "Fedora Commons Repository"
 core = "6.x"
 php = 5.0.0
-version = "6.x-1.0-beta1"
+version = "6.x-1.0-beta2"
 

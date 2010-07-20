@@ -150,7 +150,7 @@ function fedora_rest_schema() {
                                     'type'=>'varchar',
                                     'length'=>255,
                                     'not null'=>TRUE,
-                                    'default'=>'3.1'
+                                    'default'=>'3.3'
                                 ),
                     ),
         'primary key' => array('id'),
@@ -205,6 +205,6 @@ function fedora_rest_update_1() {
     $ret = array();
     db_add_field( $ret, 'fedora_rest_collection', 'version',
                  array('type'=>'varchar', 'length'=>255,
-                        'not null'=>TRUE, 'default'=>'3.1') );
+                        'not null'=>TRUE, 'default'=>'3.3') );
     return $ret;
 }

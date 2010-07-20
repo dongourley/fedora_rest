@@ -80,7 +80,7 @@ if ($user === FALSE) die("Unable to load user $username\n");
 // get settings from fedora_rest variables
 $server = variable_get( 'fedora_rest_server_arg',
                             'http://localhost:8080/fedora' );
-$version = variable_get( 'fedora_rest_version_arg', '3.1' );
+$version = variable_get( 'fedora_rest_version_arg', '3.3' );
 $collection = variable_get( 'fedora_rest_collection_arg',
                             'drupal:ImportCollection' );
 $predicate = variable_get( 'fedora_rest_predicate_arg',

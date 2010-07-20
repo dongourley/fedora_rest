@@ -83,10 +83,10 @@ function fedora_rest_admin_settings() {
     );
     $form['fedora_rest_import']['fedora_rest_batch']['fedora_rest_version_arg'] = array(
         '#type' => 'select',
-        '#options' => drupal_map_assoc(array('3.0','3.1','3.2','3.3')),
+        '#options' => drupal_map_assoc(array('3.0','3.1','3.2','3.3','3.4')),
         '#multiple' => FALSE,
         '#title' => t('REST API version'),
-        '#default_value' => variable_get('fedora_rest_version_arg', '3.1'),
+        '#default_value' => variable_get('fedora_rest_version_arg', '3.3'),
         '#description' => t('Select the Fedora repository version; this handles differences in the REST API that were introduced with version 3.2'),
         '#weight' => -8,
     );
@@ -291,7 +291,7 @@ function fedora_rest_admin_settings_submit($form, &$form_state) {
 function fedora_rest_import_items(  $server, $collection, $spoPredicate,
                                     $spoObject, $nodeType, $nodeUID=1,
                                     $delete=FALSE, $resLimit=0, $format=0,
-                                    $version='3.1')
+                                    $version='3.3')
 {
     global $user;
     global $fedora_rest_import_messages;

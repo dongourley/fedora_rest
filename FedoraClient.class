@@ -35,7 +35,7 @@ class FedoraClient {
      */
     public function __construct($svr = 'http://localhost:8080/fedora',
                                 $nm = 'fedoraAdmin', $pw = 'fedoraAdmin',
-                                $version = '3.1')
+                                $version = '3.3')
     {
         // initialize class variables
         $this->server = $svr;
